@@ -107,6 +107,7 @@ function renderMiniMap(seatStatus) {
   }
 
   const fragment = document.createDocumentFragment();
+  const sectionBreaks = new Set([2, 6]);
   for (let row = 0; row < seatStatus.length; row += 1) {
     for (let col = 0; col < seatStatus[row].length; col += 1) {
       const cell = document.createElement('div');
@@ -114,6 +115,12 @@ function renderMiniMap(seatStatus) {
       cell.className = `mini-seat-cell ${state === 'SOLD' ? 'sold' : state === 'RESERVED' ? 'reserved' : 'free'}`;
       cell.title = `Fila ${row + 1}, Asiento ${col + 1}: ${state}`;
       fragment.appendChild(cell);
+    }
+
+    if (sectionBreaks.has(row)) {
+      const spacer = document.createElement('div');
+      spacer.className = 'mini-seat-gap';
+      fragment.appendChild(spacer);
     }
   }
 

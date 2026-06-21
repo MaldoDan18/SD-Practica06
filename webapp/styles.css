@@ -257,6 +257,8 @@ button.secondary {
   position: sticky;
   top: 18px;
   align-self: start;
+  display: grid;
+  gap: 18px;
 }
 
 .mini-map-legend {
@@ -302,6 +304,11 @@ button.secondary {
   border: 1px solid rgba(255, 255, 255, 0.06);
   max-height: 720px;
   overflow: auto;
+}
+
+.mini-seat-gap {
+  grid-column: 1 / -1;
+  height: 14px;
 }
 
 .mini-seat-cell {
