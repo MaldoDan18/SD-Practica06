@@ -1,0 +1,1 @@
+# Dependencias Python del backend (actualmente solo usa librería estándar).

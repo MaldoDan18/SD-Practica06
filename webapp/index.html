@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dashboard de Venta</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">SD-Practica06 · Monitoreo en nube</p>
+        <h1>Dashboard de venta concurrente</h1>
+        <p class="lead">
+          Vista en tiempo real de asientos, tickets y eventos de la simulación.
+        </p>
+      </div>
+      <div class="status-stack">
+        <div id="statusBadge" class="status-badge" data-state="waiting">Esperando</div>
+        <p id="statusText" class="status-text">Conectando al servidor.</p>
+        <p class="status-subtext">Actualización por polling cada segundo.</p>
+      </div>
+    </header>
+
+    <section class="toolbar card">
+      <div class="field">
+        <label for="buyersInput">Compradores concurrentes</label>
+        <input id="buyersInput" type="number" min="1" max="1000" value="50" />
+      </div>
+      <div class="field">
+        <label for="buyerType">Tipo de comprador</label>
+        <select id="buyerType">
+          <option value="normal">Normal</option>
+          <option value="preferente">Preferente</option>
+          <option value="platino">Platino</option>
+        </select>
+      </div>
+      <div class="actions">
+        <button id="generateLoadBtn" class="primary">Generar carga</button>
+        <button id="refreshBtn" class="secondary">Actualizar</button>
+      </div>
+      <div class="toolbar-meta">
+        <span>Sale ID: <strong id="saleId">n/a</strong></span>
+        <span id="lastRefresh">Sin datos</span>
+      </div>
+    </section>
+
+    <main class="dashboard">
+      <div class="dashboard-main">
+        <section class="card metrics-grid" aria-label="Resumen principal">
+          <article class="metric">
+            <span>Vendidos</span>
+            <strong id="soldCount">0</strong>
+          </article>
+          <article class="metric">
+            <span>Reservados</span>
+            <strong id="reservedCount">0</strong>
+          </article>
+          <article class="metric">
+            <span>Libres</span>
+            <strong id="freeCount">0</strong>
+          </article>
+          <article class="metric accent">
+            <span>Tickets emitidos</span>
+            <strong id="ticketsCount">0</strong>
+          </article>
+          <article class="metric">
+            <span>Compradores detectados</span>
+            <strong id="buyersCreated">0</strong>
+          </article>
+          <article class="metric">
+            <span>Carga interna</span>
+            <strong id="loadStatus">Sin cargas internas activas.</strong>
+          </article>
+        </section>
+
+        <section class="card seat-types-panel">
+          <div class="panel-head">
+            <h2>Tipos de asientos</h2>
+            <p>Distribución en tiempo real de libres y comprados por tipo.</p>
+          </div>
+          <div id="seatTypeGrid" class="seat-type-grid"></div>
+        </section>
+
+        <section class="card metrics-panel">
+          <div class="panel-head">
+            <h2>Métricas del servidor</h2>
+            <p>Indicadores clave de la simulación y del servicio de tickets.</p>
+          </div>
+          <div id="metricsList" class="metrics-list"></div>
+        </section>
+
+        <section class="card events-panel">
+          <div class="panel-head">
+            <h2>Eventos recientes</h2>
+            <p>Reservas, compras, cierres y ejecuciones internas de carga.</p>
+          </div>
+          <ul id="eventsList" class="events-list"></ul>
+        </section>
+      </div>
+
+      <aside class="card mini-map-panel">
+        <div class="panel-head">
+          <h2>Mapa simplificado</h2>
+          <p>Estados en tiempo real de todo el auditorio.</p>
+        </div>
+
+        <div class="mini-map-legend">
+          <span><i class="legend-swatch free"></i> Libre</span>
+          <span><i class="legend-swatch reserved"></i> Reservado</span>
+          <span><i class="legend-swatch sold"></i> Comprado</span>
+        </div>
+
+        <div id="miniSeatMap" class="mini-seat-map" aria-label="Mapa simplificado de asientos"></div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

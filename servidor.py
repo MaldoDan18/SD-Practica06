@@ -7,8 +7,17 @@ import socket
 import socketserver
 import threading
 import time
-import tkinter as tk
 import uuid
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from mimetypes import guess_type
+from pathlib import Path
+from urllib.parse import urlparse
+
+try:
+    import tkinter as tk
+except Exception:  # pragma: no cover - the web deployment runs headless
+    tk = None
 
 FILAS = 30
 COLUMNAS = 50
@@ -21,6 +30,13 @@ ZONA_PLATINO = "PLATINO"
 ZONA_PREFERENTE = "PREFERENTE"
 ZONA_NORMAL = "NORMAL"
 
+ZONE_ORDER = (ZONA_PLATINO, ZONA_PREFERENTE, ZONA_NORMAL)
+ZONE_TO_BUYER_TYPE = {
+    ZONA_PLATINO: "platino",
+    ZONA_PREFERENTE: "preferente",
+    ZONA_NORMAL: "normal",
+}
+
 TIPO_PLATINO = "platino"
 TIPO_PREFERENTE = "preferente"
 TIPO_NORMAL = "normal"
@@ -32,6 +48,7 @@ ALLOWED_ZONES_BY_TYPE = {
 }
 
 TICKET_SERVICE_TIMEOUT = 4.0
+WEBAPP_DIR = Path(__file__).resolve().parent / "webapp"
 
 
 def send_json_request(host, port, payload, timeout=TICKET_SERVICE_TIMEOUT):
@@ -92,6 +109,7 @@ class TicketingServiceClient:
 class TicketState:
     def __init__(self):
         self.meta_lock = threading.Lock()
+        self.events_lock = threading.Lock()
         self.terminal_lock = threading.Lock()
         self.ticketing_client = None
         self.sale_id = None
@@ -134,6 +152,7 @@ class TicketState:
         self.summary_printed = False
         self.hitos_reportados = set()
         self.close_reason = None
+        self.recent_events = []
 
         self.metrics = {
             "request_ticket_count": 0,
@@ -159,12 +178,25 @@ class TicketState:
         self.server_host = server_host
         self.server_port = server_port
 
+    def _record_event(self, event_type, **details):
+        event = {
+            "type": event_type,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        event.update(details)
+        with self.events_lock:
+            self.recent_events.append(event)
+            if len(self.recent_events) > 60:
+                self.recent_events = self.recent_events[-60:]
+
     def open_sales(self):
         with self.meta_lock:
             if self.sales_open_event.is_set():
                 return
             self.sales_started_at = time.perf_counter()
             self.sales_open_event.set()
+
+        self._record_event("sale_opened", sale_id=self.sale_id)
 
         with self.terminal_lock:
             print("Actualizaciones de venta:")
@@ -202,6 +234,13 @@ class TicketState:
                 self.close_reason = reason
                 self.sales_closed_event.set()
                 self.sold_out_event.set()
+
+            self._record_event(
+                "sale_closed",
+                sale_id=self.sale_id,
+                reason=reason,
+                released_reservations=released,
+            )
 
             with self.terminal_lock:
                 if released > 0:
@@ -350,6 +389,15 @@ class TicketState:
                     self.metrics["request_ticket_ok"] += 1
                     self.metrics["request_ticket_time_total"] += time.perf_counter() - started
 
+                self._record_event(
+                    "reservation_created",
+                    buyer_id=str(buyer_id),
+                    buyer_type=(buyer_type or TIPO_NORMAL).lower(),
+                    zone=zone,
+                    seat={"row": row, "col": col},
+                    reservation_id=reservation_id,
+                )
+
                 return {
                     "status": "ok",
                     "reservation_id": reservation_id,
@@ -369,6 +417,7 @@ class TicketState:
         if sold_count >= TOTAL_ASIENTOS:
             with self.meta_lock:
                 self._mark_sold_out_locked()
+            self._record_event("sold_out", sold_count=sold_count)
             return {"status": "sold_out", "message": "No hay asientos disponibles."}
 
         return {
@@ -505,6 +554,15 @@ class TicketState:
                 sold_now = self.sold_count
                 self.metrics["purchase_time_total"] += time.perf_counter() - started
 
+            self._record_event(
+                "ticket_sold",
+                buyer_id=str(buyer_id),
+                reservation_id=reservation_id,
+                zone=zone,
+                seat={"row": row, "col": col},
+                ticket_id=ticket_id,
+            )
+
             return {
                 "status": "ok",
                 "reservation_id": reservation_id,
@@ -526,13 +584,32 @@ class TicketState:
         try:
             seat_status_copy = [row[:] for row in self.seat_status]
             reserved_count = sum(len(self.reservations_by_zone[z]) for z in self.reservations_by_zone)
+            seats_by_type = {}
+            with self.events_lock:
+                recent_events = list(self.recent_events)
             with self.meta_lock:
+                for zone in ZONE_ORDER:
+                    buyer_type = ZONE_TO_BUYER_TYPE[zone]
+                    total_seats = len(self.zone_free_seats[zone]) + len(self.reservations_by_zone[zone]) + self.purchased_by_type[buyer_type]
+                    seats_by_type[buyer_type] = {
+                        "free": len(self.zone_free_seats[zone]),
+                        "sold": self.purchased_by_type[buyer_type],
+                        "reserved": len(self.reservations_by_zone[zone]),
+                        "total": total_seats,
+                    }
                 return {
                     "sold_count": self.sold_count,
                     "reserved_count": reserved_count,
                     "free_count": TOTAL_ASIENTOS - self.sold_count - reserved_count,
                     "buyers_created": len(self.unique_buyers),
                     "seat_status": seat_status_copy,
+                    "sales_open": self.sales_open_event.is_set(),
+                    "sales_closed": self.sales_closed_event.is_set(),
+                    "close_reason": self.close_reason,
+                    "sale_id": self.sale_id,
+                    "metrics": dict(self.metrics),
+                    "recent_events": recent_events,
+                    "seats_by_type": seats_by_type,
                 }
         finally:
             for lock in reversed(lock_order):
@@ -581,6 +658,284 @@ class TicketState:
             print(f"Tickets rechazados: {self.metrics['ticket_request_fail']}")
             print(f"Tiempo promedio ticketing: {ticket_avg:.6f} s")
             print("==========================================\n")
+
+
+def normalize_buyer_type(raw_type):
+    normalized = (raw_type or TIPO_NORMAL).strip().lower()
+    if normalized not in ALLOWED_ZONES_BY_TYPE:
+        return TIPO_NORMAL
+    return normalized
+
+
+def run_internal_load(ticket_state, buyers=50, client_type=TIPO_NORMAL, worker_delay=(0.01, 0.06)):
+    buyers = max(1, int(buyers))
+    client_type = normalize_buyer_type(client_type)
+    client_id = f"LOAD-{uuid.uuid4().hex[:8].upper()}"
+
+    ticket_state.register_client_buyers(client_type, buyers)
+    ticket_state.open_sales()
+    ticket_state._record_event("load_started", client_id=client_id, buyers=buyers, client_type=client_type)
+
+    stats = {
+        "client_id": client_id,
+        "client_type": client_type,
+        "buyers": buyers,
+        "success": 0,
+        "fail": 0,
+        "network_errors": 0,
+        "started_at": time.perf_counter(),
+        "finished_at": None,
+    }
+    stats_lock = threading.Lock()
+
+    def buyer_worker(buyer_number):
+        buyer_id = f"{client_id}-B{buyer_number}"
+        purchased = False
+        local_network_errors = 0
+
+        while not ticket_state.sales_closed() and not ticket_state.sold_out_event.is_set():
+            time.sleep(random.uniform(*worker_delay))
+
+            reserve_response = ticket_state.request_ticket(buyer_id, client_type, str(uuid.uuid4()))
+            reserve_status = reserve_response.get("status")
+
+            if reserve_status == "ok":
+                reservation_id = reserve_response.get("reservation_id")
+                if not reservation_id:
+                    continue
+            elif reserve_status in {"closed", "sold_out"}:
+                break
+            elif reserve_status == "not_started":
+                time.sleep(0.05)
+                continue
+            else:
+                time.sleep(0.03)
+                continue
+
+            purchase_response = ticket_state.purchase(buyer_id, reservation_id, str(uuid.uuid4()))
+            purchase_status = purchase_response.get("status")
+
+            if purchase_status == "ok":
+                purchased = True
+                if int(purchase_response.get("remaining") or 1) <= 0:
+                    ticket_state.sold_out_event.set()
+                break
+
+            if purchase_status in {"closed", "sold_out"}:
+                break
+
+            if purchase_status == "not_started":
+                time.sleep(0.05)
+                continue
+
+            time.sleep(0.03)
+
+        with stats_lock:
+            if purchased:
+                stats["success"] += 1
+            else:
+                stats["fail"] += 1
+            stats["network_errors"] += local_network_errors
+
+    threads = []
+    for buyer_number in range(1, buyers + 1):
+        thread = threading.Thread(target=buyer_worker, args=(buyer_number,), daemon=True)
+        threads.append(thread)
+        thread.start()
+        time.sleep(0.001)
+
+    for thread in threads:
+        thread.join()
+
+    stats["finished_at"] = time.perf_counter()
+    stats["elapsed"] = stats["finished_at"] - stats["started_at"]
+
+    ticket_state._record_event(
+        "load_finished",
+        client_id=client_id,
+        buyers=buyers,
+        success=stats["success"],
+        fail=stats["fail"],
+    )
+
+    return stats
+
+class LoadJobManager:
+    def __init__(self, ticket_state):
+        self.ticket_state = ticket_state
+        self.lock = threading.Lock()
+        self.jobs = {}
+
+    def start_job(self, buyers=50, client_type=TIPO_NORMAL):
+        job_id = uuid.uuid4().hex[:12]
+        job = {
+            "job_id": job_id,
+            "status": "running",
+            "buyers": max(1, int(buyers)),
+            "client_type": normalize_buyer_type(client_type),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "started_at": time.perf_counter(),
+            "finished_at": None,
+            "result": None,
+            "error": None,
+        }
+
+        with self.lock:
+            self.jobs[job_id] = job
+
+        def runner():
+            try:
+                result = run_internal_load(self.ticket_state, buyers=job["buyers"], client_type=job["client_type"])
+                with self.lock:
+                    job["status"] = "finished"
+                    job["finished_at"] = time.perf_counter()
+                    job["result"] = result
+            except Exception as exc:
+                with self.lock:
+                    job["status"] = "failed"
+                    job["finished_at"] = time.perf_counter()
+                    job["error"] = str(exc)
+
+        threading.Thread(target=runner, daemon=True).start()
+        return dict(job)
+
+    def snapshot(self):
+        with self.lock:
+            jobs = []
+            for job in self.jobs.values():
+                item = dict(job)
+                if item.get("finished_at") is not None and item.get("started_at") is not None:
+                    item["elapsed"] = item["finished_at"] - item["started_at"]
+                jobs.append(item)
+            jobs.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+            return jobs
+
+
+class CloudSaleHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, server_address, handler_class, ticket_state):
+        super().__init__(server_address, handler_class)
+        self.ticket_state = ticket_state
+        self.load_jobs = LoadJobManager(ticket_state)
+
+
+class CloudSaleHTTPRequestHandler(BaseHTTPRequestHandler):
+    server_version = "SaleCloudAPI/1.0"
+
+    def log_message(self, format, *args):  # noqa: A003
+        return
+
+    def end_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        super().end_headers()
+
+    def _send_json(self, status_code, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_json(self):
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        if not raw_body:
+            return {}
+        payload = json.loads(raw_body.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("invalid_json")
+        return payload
+
+    @property
+    def state(self):
+        return self.server.ticket_state  # type: ignore[attr-defined]
+
+    @property
+    def load_jobs(self):
+        return self.server.load_jobs  # type: ignore[attr-defined]
+
+    def _api_path(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path.startswith("/api/"):
+            path = path[4:]
+        elif path == "/api":
+            path = "/"
+        return path
+
+    def do_OPTIONS(self):  # noqa: N802
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.end_headers()
+
+    def do_GET(self):  # noqa: N802
+        path = self._api_path()
+
+        if path in {"/", "/index.html", ""}:
+            index_file = WEBAPP_DIR / "index.html"
+            if not index_file.exists():
+                self._send_json(HTTPStatus.NOT_FOUND, {"status": "error", "code": "not_found"})
+                return
+
+            body = index_file.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        static_file = WEBAPP_DIR / path.lstrip("/")
+        if static_file.is_file() and static_file.suffix.lower() in {".css", ".js", ".png", ".svg", ".ico"}:
+            body = static_file.read_bytes()
+            content_type, _ = guess_type(static_file.name)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type or "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == "/health":
+            self._send_json(HTTPStatus.OK, {"status": "ok", "service": "sale-api"})
+            return
+
+        if path == "/stats":
+            snapshot = self.state.get_snapshot()
+            snapshot["status"] = "ok"
+            snapshot["load_jobs"] = self.load_jobs.snapshot()
+            snapshot["summary"] = {
+                "sold_count": snapshot.get("sold_count", 0),
+                "reserved_count": snapshot.get("reserved_count", 0),
+                "free_count": snapshot.get("free_count", 0),
+                "tickets_emitted": snapshot.get("metrics", {}).get("ticket_request_ok", 0),
+            }
+            self._send_json(HTTPStatus.OK, snapshot)
+            return
+
+        self._send_json(HTTPStatus.NOT_FOUND, {"status": "error", "code": "not_found"})
+
+    def do_POST(self):  # noqa: N802
+        path = self._api_path()
+
+        try:
+            payload = self._read_json()
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"status": "error", "code": "invalid_json"})
+            return
+
+        if path in {"/generate-load", "/load"}:
+            buyers = int(payload.get("buyers") or 50)
+            client_type = payload.get("client_type") or TIPO_NORMAL
+            job = self.load_jobs.start_job(buyers=buyers, client_type=client_type)
+            self._send_json(HTTPStatus.ACCEPTED, {"status": "ok", "job": job})
+            return
+
+        self._send_json(HTTPStatus.NOT_FOUND, {"status": "error", "code": "not_found"})
 
 
 class TicketServer(socketserver.ThreadingTCPServer):
@@ -1180,12 +1535,10 @@ def monitor_sold_out(ticket_state):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Servidor de boletos - Múltiples clientes")
-    parser.add_argument("expected_clients", type=int, help="Cantidad de clientes que deben conectarse antes de iniciar")
-    parser.add_argument("--host", default="127.0.0.1", help="Host para escuchar conexiones")
-    parser.add_argument("--port", type=int, default=5000, help="Puerto para escuchar conexiones")
-    parser.add_argument("--no-gui", action="store_true", help="Ejecuta el servidor sin visualización")
-    parser.add_argument("--sale-id", default=None, help="Identificador de esta venta/servidor")
+    parser = argparse.ArgumentParser(description="Servidor de boletos para despliegue en nube")
+    parser.add_argument("--host", default="0.0.0.0", help="Host para escuchar conexiones HTTP")
+    parser.add_argument("--port", type=int, default=8080, help="Puerto para escuchar conexiones HTTP")
+    parser.add_argument("--sale-id", default="venta-cloud", help="Identificador de esta venta")
     parser.add_argument("--ticket-service-host", default="127.0.0.1", help="Host del Ticketing Service externo")
     parser.add_argument("--ticket-service-port", type=int, default=7000, help="Puerto del Ticketing Service externo")
     return parser.parse_args()
@@ -1193,12 +1546,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.expected_clients <= 0:
-        raise ValueError("expected_clients debe ser mayor que 0")
-
-    expected_clients = args.expected_clients
     sale_id = args.sale_id or f"{args.host}:{args.port}"
-    use_global_sync = False
 
     ticket_state = TicketState()
     ticket_state.set_sale_context(sale_id, args.host, args.port)
@@ -1206,72 +1554,25 @@ def main():
     ticketing_client = TicketingServiceClient(args.ticket_service_host, args.ticket_service_port)
     ticket_state.set_ticketing_client(ticketing_client)
 
-    server = TicketServer(
-        (args.host, args.port),
-        TicketRequestHandler,
-        ticket_state,
-        expected_clients,
-        sale_id,
-        use_global_sync=use_global_sync,
-    )
-    # Coordinator integration removed — running with local synchronization only.
+    server = CloudSaleHTTPServer((args.host, args.port), CloudSaleHTTPRequestHandler, ticket_state)
 
-    monitor_thread = threading.Thread(target=monitor_sold_out, args=(ticket_state,), daemon=True)
-    monitor_thread.start()
-
-    cleanup_thread = threading.Thread(target=cleanup_expired_reservations, args=(ticket_state,), daemon=True)
-    cleanup_thread.start()
-
-    print("Servidor de boletos iniciado")
-    print(f"Escuchando en {args.host}:{args.port}")
+    print("Servidor HTTP de boletos iniciado")
+    print(f"Escuchando en http://{args.host}:{args.port}")
     print(f"Sale ID: {sale_id}")
-    print(f"Asientos disponibles: {TOTAL_ASIENTOS}")
-    print(f"Clientes esperados para iniciar: {expected_clients}")
-    print("Zonas: PLATINO (filas 1-3), PREFERENTE (4-7), NORMAL (8-30)")
     print(f"Ticketing Service: {args.ticket_service_host}:{args.ticket_service_port}")
-    # Coordinator integration removed; no global coordinator to print.
-
-    if args.no_gui:
-        def wait_and_start():
-            if server.use_global_sync:
-                print("Esperando sincronización global de servidores...")
-                server.global_start_event.wait()
-            else:
-                server.all_ready_event.wait()
-            for i in range(5, 0, -1):
-                print(f"  Iniciando en {i}...")
-                time.sleep(1)
-            server.trigger_start()
-
-        countdown_thread = threading.Thread(target=wait_and_start, daemon=True)
-        countdown_thread.start()
-
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            print("\n[Servidor] Interrupción recibida. Cerrando servidor...")
-        finally:
-            server.shutdown()
-            server.server_close()
-            ticket_state.print_summary_once()
-        return
-
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
+    print("Endpoints: /health, /stats, /generate-load")
 
     try:
-        dashboard = ServerDashboard(ticket_state, server, args.host, args.port)
-        dashboard.run()
-    except tk.TclError:
-        print("[Servidor] No fue posible iniciar la interfaz. Ejecuta con --no-gui o revisa tu entorno gráfico.")
-        server.shutdown()
-        server.server_close()
-        ticket_state.print_summary_once()
+        server.serve_forever()
     except KeyboardInterrupt:
         print("\n[Servidor] Interrupción recibida. Cerrando servidor...")
+    finally:
+        with ticket_state.meta_lock:
+            if not ticket_state.sales_closed_event.is_set():
+                ticket_state.close_sales("shutdown")
+        ticket_state.print_summary_once()
         server.shutdown()
         server.server_close()
-        ticket_state.print_summary_once()
 
 
 if __name__ == "__main__":
