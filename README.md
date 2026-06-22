@@ -1,6 +1,20 @@
 # SD-Practica06
 
-Despliegue en nube de la práctica de venta concurrente con tres piezas separadas:
+Versión adaptada para despliegue en nube de la práctica de ventas concurrentes.
+
+## Objetivo del dashboard
+
+Mostrar en tiempo real el estado de la venta: asientos libres, reservados y vendidos, tickets emitidos, eventos recientes y avance de la carga. El dashboard no vende boletos; solo monitorea la simulación y permite lanzar cargas de prueba.
+
+## Cambios frente a la práctica original
+
+- Se reemplazó la interfaz de escritorio por un dashboard web.
+- Se agregó un backend HTTP para exponer métricas y control de carga.
+- Se dockerizaron frontend, API y ticketing service.
+- Se añadió un botón para generar carga y otro para reiniciar la venta.
+- Se eliminó la dependencia de WebSockets, service workers e IndexedDB.
+
+## Componentes
 
 - `webapp/`: dashboard visual de monitoreo.
 - `servidor.py`: API principal de la venta.
@@ -8,9 +22,9 @@ Despliegue en nube de la práctica de venta concurrente con tres piezas separada
 
 ## Arquitectura
 
-Usuario -> Frontend web -> Servidor API -> Ticketing Service
+Usuario -> Dashboard web -> Servidor API -> Ticketing Service
 
-El frontend consulta `GET /api/stats` cada segundo y dispara la simulación con `POST /api/generate-load`.
+El frontend consulta `GET /api/stats` y dispara la simulación con `POST /api/generate-load`.
 
 ## Ejecución local
 
@@ -30,7 +44,7 @@ python servidor.py --host 127.0.0.1 --port 8080 --ticket-service-host 127.0.0.1 
 
 ## Docker
 
-La VM no necesita instalar Python ni Java para esta práctica. Todo corre dentro de Docker.
+La VM no necesita instalar Python ni Java. Todo corre dentro de Docker.
 
 Prerrequisitos en cualquier VM Linux de Azure, GCP o AWS:
 
@@ -48,16 +62,16 @@ sudo usermod -aG docker $USER
 
 Después cierra sesión y vuelve a entrar para usar Docker sin `sudo`.
 
-Despliegue paso a paso:
+Despliegue básico:
 
 1. Clona el repositorio en la VM.
 2. Entra a la carpeta `SD-Practica06`.
 3. Verifica la configuración con `docker compose config`.
-4. Construye y levanta los contenedores con `docker compose up -d --build`.
-5. Abre el puerto `80` en el firewall / security group de la VM.
+4. Levanta los contenedores con `docker compose up -d --build`.
+5. Abre el puerto `80` en el NSG o firewall de la VM.
 6. Entra al dashboard desde `http://IP_PUBLICA/`.
 
-Si quieres probar los servicios internos para depuración, también puedes exponer `8080` y `7000`, pero para uso normal basta con el `80` del frontend.
+Para depuración puedes exponer `8080` y `7000`, pero para uso normal basta con `80`.
 
 Servicios:
 
@@ -67,6 +81,6 @@ Servicios:
 
 ## Operación
 
-- El botón `Generar carga` lanza internamente una simulación concurrente de compradores.
+- `Generar carga` inicia una simulación concurrente de compradores.
+- `Reiniciar venta` limpia la venta, las reservas y los registros visibles.
 - La vista muestra asientos vendidos, reservados, libres, tickets emitidos, métricas y eventos recientes.
-- No usa WebSockets, IndexedDB, service workers ni carrito de compras.
