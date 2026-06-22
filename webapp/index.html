@@ -39,7 +39,7 @@
       </div>
       <div class="actions">
         <button id="generateLoadBtn" class="primary">Generar carga</button>
-        <button id="refreshBtn" class="secondary">Actualizar</button>
+        <button id="restartBtn" class="secondary">Reiniciar venta</button>
       </div>
       <div class="toolbar-meta">
         <span>Sale ID: <strong id="saleId">n/a</strong></span>
@@ -116,6 +116,9 @@
         </section>
       </aside>
     </main>
+  </div>
+  <div id="overlay" class="overlay hidden" aria-hidden="true">
+    <div class="overlay-dialog">Reiniciando venta...</div>
   </div>
 
   <script src="app.js"></script>

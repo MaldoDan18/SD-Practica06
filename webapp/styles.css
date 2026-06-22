@@ -565,3 +565,22 @@ button.secondary {
     width: 100%;
   }
 }
+
+/* Overlay for restart action */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 16, 0.6);
+  display: grid;
+  place-items: center;
+  z-index: 9999;
+}
+.overlay.hidden { display: none; }
+.overlay-dialog {
+  background: var(--card);
+  padding: 24px 28px;
+  border-radius: 12px;
+  border: 1px solid var(--card-border);
+  font-weight: 800;
+  font-size: 18px;
+}

@@ -18,6 +18,7 @@ const elements = {
   buyersInput: document.getElementById('buyersInput'),
   buyerType: document.getElementById('buyerType'),
   refreshBtn: document.getElementById('refreshBtn'),
+  restartBtn: document.getElementById('restartBtn'),
   lastRefresh: document.getElementById('lastRefresh'),
   toastArea: document.getElementById('toastArea'),
 };
@@ -206,6 +207,39 @@ function maybeShowProgressToast(stats) {
   }
 }
 
+function showOverlay(message) {
+  const overlay = document.getElementById('overlay');
+  if (!overlay) return;
+  overlay.querySelector('.overlay-dialog').textContent = message;
+  overlay.classList.remove('hidden');
+  overlay.setAttribute('aria-hidden', 'false');
+}
+
+function hideOverlay() {
+  const overlay = document.getElementById('overlay');
+  if (!overlay) return;
+  overlay.classList.add('hidden');
+  overlay.setAttribute('aria-hidden', 'true');
+}
+
+async function restartSale() {
+  if (!confirm('¿Seguro que desea reiniciar la venta? Esto limpiará tickets y reservas.')) return;
+  elements.restartBtn.disabled = true;
+  showOverlay('Reiniciando venta...');
+  try {
+    const resp = await fetch(`${API_BASE}/restart-sale`, { method: 'POST' });
+    if (!resp.ok) throw new Error('no_ok');
+    // keep overlay for 3.5s to show the message
+    await new Promise((r) => setTimeout(r, 3500));
+    await fetchStats();
+  } catch (err) {
+    showToast('Error', 'No fue posible reiniciar la venta.', 'danger');
+  } finally {
+    hideOverlay();
+    elements.restartBtn.disabled = false;
+  }
+}
+
 function updateSummary(stats) {
   elements.statusBadge.textContent = stats.sales_closed ? 'Cerrada' : (stats.sales_open ? 'Abierta' : 'Esperando');
   elements.statusBadge.dataset.state = stats.sales_closed ? 'closed' : (stats.sales_open ? 'open' : 'waiting');
@@ -290,7 +324,7 @@ function startPolling() {
 }
 
 elements.generateBtn.addEventListener('click', generateLoad);
-elements.refreshBtn.addEventListener('click', fetchStats);
+elements.restartBtn.addEventListener('click', restartSale);
 
 document.addEventListener('DOMContentLoaded', async () => {
   await fetchStats();

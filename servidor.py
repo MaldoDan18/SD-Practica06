@@ -321,6 +321,58 @@ class TicketState:
         finally:
             zone_lock.release()
 
+    def reset_sale(self):
+        # Fully reset sale state: seats, reservations, metrics, events.
+        lock_order = [self.zone_locks[ZONA_PLATINO], self.zone_locks[ZONA_PREFERENTE], self.zone_locks[ZONA_NORMAL]]
+        for lock in lock_order:
+            lock.acquire()
+
+        try:
+            with self.meta_lock:
+                # Close current sale to make running workers stop promptly
+                self.sales_closed_event.set()
+                self.sold_out_event.set()
+
+                # Reset seat pools and statuses
+                self.zone_free_seats = build_zone_seats()
+                self.seat_status = [["FREE" for _ in range(COLUMNAS)] for _ in range(FILAS)]
+
+                # Clear reservations
+                for zone in (ZONA_PLATINO, ZONA_PREFERENTE, ZONA_NORMAL):
+                    self.reservations_by_zone[zone].clear()
+                self.reservation_to_zone.clear()
+
+                # Reset buyers/metrics
+                self.unique_buyers.clear()
+                for k in self.registered_buyers_by_type:
+                    self.registered_buyers_by_type[k] = 0
+                for k in self.purchased_by_type:
+                    self.purchased_by_type[k] = 0
+                self.sold_count = 0
+
+                for key in list(self.metrics.keys()):
+                    self.metrics[key] = 0 if isinstance(self.metrics[key], int) else 0.0
+
+                # Reset timing/state
+                self.sales_started_at = None
+                self.sales_finished_at = None
+                self.sales_open_event.clear()
+                self.sales_closed_event.clear()
+                self.sold_out_event.clear()
+                self.summary_printed = False
+                self.hitos_reportados.clear()
+                self.close_reason = None
+
+                # Clear recent events and set a new sale id
+                self.recent_events = []
+                self.sale_id = f"venta-{uuid.uuid4().hex[:8]}"
+
+                # Record restart event
+                self._record_event("sale_restarted", sale_id=self.sale_id)
+        finally:
+            for lock in reversed(lock_order):
+                lock.release()
+
     def can_buyer_type_keep_trying(self, buyer_type):
         normalized = normalize_buyer_type(buyer_type)
         zones = ALLOWED_ZONES_BY_TYPE.get(normalized, ALLOWED_ZONES_BY_TYPE[TIPO_NORMAL])
@@ -948,6 +1000,15 @@ class LoadJobManager:
             jobs.sort(key=lambda item: item.get("created_at", ""), reverse=True)
             return jobs
 
+    def clear_jobs(self):
+        with self.lock:
+            # Mark running jobs as cancelled and drop history
+            for jid, j in list(self.jobs.items()):
+                if j.get("status") == "running":
+                    j["status"] = "cancelled"
+                    j["finished_at"] = time.perf_counter()
+            self.jobs.clear()
+
 
 class CloudSaleHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
@@ -1071,6 +1132,32 @@ class CloudSaleHTTPRequestHandler(BaseHTTPRequestHandler):
             client_type = payload.get("client_type") or TIPO_NORMAL
             job = self.load_jobs.start_job(buyers=buyers, client_type=client_type)
             self._send_json(HTTPStatus.ACCEPTED, {"status": "ok", "job": job})
+            return
+
+        if path in {"/restart-sale", "/restart-sale"}:
+            # Reset server-side sale state and clear persisted tickets file if present
+            try:
+                self.state.reset_sale()
+                try:
+                    # Clear any internal load job records so the UI reflects a clean state
+                    self.load_jobs.clear_jobs()
+                except Exception:
+                    pass
+                # Attempt to clear tickets storage if available on disk
+                tickets_path = Path(__file__).resolve().parent / "tickets" / "tickets.txt"
+                try:
+                    if tickets_path.exists():
+                        tickets_path.write_text("")
+                except Exception:
+                    # Non-fatal: continue even if file can't be cleared
+                    pass
+
+                with self.state.terminal_lock:
+                    print("Actualización: venta reiniciada por petición REST.")
+
+                self._send_json(HTTPStatus.ACCEPTED, {"status": "ok", "message": "sale_restarted"})
+            except Exception as exc:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"status": "error", "message": str(exc)})
             return
 
         self._send_json(HTTPStatus.NOT_FOUND, {"status": "error", "code": "not_found"})
