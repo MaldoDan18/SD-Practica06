@@ -286,7 +286,7 @@ function startPolling() {
   if (pollingHandle) {
     clearInterval(pollingHandle);
   }
-  pollingHandle = setInterval(fetchStats, 250);
+  pollingHandle = setInterval(fetchStats, 150);
 }
 
 elements.generateBtn.addEventListener('click', generateLoad);

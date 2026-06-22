@@ -829,6 +829,7 @@ def run_internal_load(ticket_state, buyers=50, client_type=TIPO_NORMAL, worker_d
                 if not reservation_id:
                     continue
 
+                time.sleep(random.uniform(0.04, 0.12))
                 purchase_response = ticket_state.purchase(buyer_id, reservation_id, str(uuid.uuid4()))
                 purchase_status = purchase_response.get("status")
 
