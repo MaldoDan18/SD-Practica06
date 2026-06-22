@@ -19,11 +19,15 @@ const elements = {
   buyerType: document.getElementById('buyerType'),
   refreshBtn: document.getElementById('refreshBtn'),
   lastRefresh: document.getElementById('lastRefresh'),
+  toastArea: document.getElementById('toastArea'),
 };
 
 let pollingHandle = null;
 let inFlight = false;
 let lastStats = null;
+let lastSoldPercentNotified = 0;
+let lastMilestoneShown = new Set();
+const progressMilestones = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 
 function escapeText(value) {
   return String(value ?? '');
@@ -44,8 +48,8 @@ function formatDuration(seconds) {
 
 function formatMetricRows(metrics) {
   const rows = [
-    ['Requests de reserva', metrics.request_ticket_count],
-    ['Reservas exitosas', metrics.request_ticket_ok],
+    ['Reservas solicitadas', metrics.request_ticket_count],
+    ['Reservas aceptadas', metrics.request_ticket_ok],
     ['Compras procesadas', metrics.purchase_count],
     ['Compras exitosas', metrics.purchase_ok],
     ['Compras rechazadas', metrics.purchase_rejected],
@@ -168,6 +172,40 @@ function renderLoadJobs(loadJobs) {
   elements.loadStatus.textContent = `Carga ${activeJob.job_id} · ${activeJob.status} · ${elapsed}${result ? ` · ${result}` : ''}`;
 }
 
+function showToast(title, message, variant = 'info') {
+  if (!elements.toastArea) return;
+
+  const toast = document.createElement('div');
+  toast.className = `toast-notice ${variant}`;
+  toast.innerHTML = `
+    <div class="toast-title">${escapeText(title)}</div>
+    <div class="toast-body">${escapeText(message)}</div>
+  `;
+
+  elements.toastArea.appendChild(toast);
+  window.setTimeout(() => {
+    toast.classList.add('fade-out');
+    window.setTimeout(() => toast.remove(), 280);
+  }, 4200);
+}
+
+function maybeShowProgressToast(stats) {
+  const totalSeats = 1500;
+  const soldCount = Number(stats.sold_count || 0);
+  const percent = Math.floor((soldCount / totalSeats) * 100);
+
+  for (const milestone of progressMilestones) {
+    if (percent >= milestone && !lastMilestoneShown.has(milestone)) {
+      lastMilestoneShown.add(milestone);
+      showToast('Avance de venta', `${milestone}% de los asientos vendidos (${soldCount}/${totalSeats}).`, milestone === 100 ? 'success' : 'info');
+    }
+  }
+
+  if (percent > lastSoldPercentNotified) {
+    lastSoldPercentNotified = percent;
+  }
+}
+
 function updateSummary(stats) {
   elements.statusBadge.textContent = stats.sales_closed ? 'Cerrada' : (stats.sales_open ? 'Abierta' : 'Esperando');
   elements.statusBadge.dataset.state = stats.sales_closed ? 'closed' : (stats.sales_open ? 'open' : 'waiting');
@@ -187,6 +225,8 @@ function updateSummary(stats) {
   renderMiniMap(stats.seat_status || []);
   renderEvents(stats.recent_events || []);
   renderLoadJobs(stats.load_jobs || []);
+
+  maybeShowProgressToast(stats);
 
   const now = new Date();
   elements.lastRefresh.textContent = `Actualizado ${now.toLocaleTimeString()}`;
@@ -246,7 +286,7 @@ function startPolling() {
   if (pollingHandle) {
     clearInterval(pollingHandle);
   }
-  pollingHandle = setInterval(fetchStats, 1000);
+  pollingHandle = setInterval(fetchStats, 250);
 }
 
 elements.generateBtn.addEventListener('click', generateLoad);

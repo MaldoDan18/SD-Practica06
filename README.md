@@ -30,13 +30,15 @@ python servidor.py --host 127.0.0.1 --port 8080 --ticket-service-host 127.0.0.1 
 
 ## Docker
 
-Prerequisitos en VM Ubuntu (Azure/GCP/AWS):
+La VM no necesita instalar Python ni Java para esta práctica. Todo corre dentro de Docker.
+
+Prerrequisitos en cualquier VM Linux de Azure, GCP o AWS:
 
 - `git`
 - `docker engine`
 - `docker compose plugin`
 
-Instalación rápida (Ubuntu):
+Instalación rápida en Ubuntu:
 
 ```bash
 sudo apt update
@@ -44,19 +46,24 @@ sudo apt install -y git docker.io docker-compose-v2
 sudo usermod -aG docker $USER
 ```
 
-Luego cerrar sesión y volver a entrar para usar Docker sin `sudo`.
+Después cierra sesión y vuelve a entrar para usar Docker sin `sudo`.
 
-Levanta todo con:
+Despliegue paso a paso:
 
-```bash
-docker compose up -d --build
-```
+1. Clona el repositorio en la VM.
+2. Entra a la carpeta `SD-Practica06`.
+3. Verifica la configuración con `docker compose config`.
+4. Construye y levanta los contenedores con `docker compose up -d --build`.
+5. Abre el puerto `80` en el firewall / security group de la VM.
+6. Entra al dashboard desde `http://IP_PUBLICA/`.
 
-Servicios expuestos:
+Si quieres probar los servicios internos para depuración, también puedes exponer `8080` y `7000`, pero para uso normal basta con el `80` del frontend.
+
+Servicios:
 
 - Frontend: `http://localhost/`
-- API: `http://localhost:8080/`
-- Ticketing Service: `http://localhost:7000/`
+- API interna: `http://server:8080/` dentro de la red Docker
+- Ticketing Service interno: `http://ticketing_service:7000/` dentro de la red Docker
 
 ## Operación
 

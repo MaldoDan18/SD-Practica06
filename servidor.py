@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover - the web deployment runs headless
 FILAS = 30
 COLUMNAS = 50
 TOTAL_ASIENTOS = FILAS * COLUMNAS
-RESERVA_TTL_SEGUNDOS = 1.0
+RESERVA_TTL_SEGUNDOS = 1.5
 SECTION_GAP_ROWS = 2
 SECTION_LABEL_ROWS = 1
 
@@ -249,6 +249,96 @@ class TicketState:
             for lock in reversed(lock_order):
                 lock.release()
 
+    def release_reservations_for_buyer_prefix(self, buyer_prefix, reason):
+        lock_order = [self.zone_locks[ZONA_PLATINO], self.zone_locks[ZONA_PREFERENTE], self.zone_locks[ZONA_NORMAL]]
+        for lock in lock_order:
+            lock.acquire()
+
+        released = 0
+        try:
+            for zone in (ZONA_PLATINO, ZONA_PREFERENTE, ZONA_NORMAL):
+                zone_reservations = self.reservations_by_zone[zone]
+                for reservation_id, info in list(zone_reservations.items()):
+                    if not str(info.get("buyer_id", "")).startswith(buyer_prefix):
+                        continue
+
+                    row, col = info["seat"]
+                    self.seat_status[row][col] = "FREE"
+                    self.zone_free_seats[zone].add((row, col))
+                    zone_reservations.pop(reservation_id, None)
+                    released += 1
+
+                    with self.meta_lock:
+                        self.reservation_to_zone.pop(reservation_id, None)
+
+                    self._record_event(
+                        "reservation_released",
+                        buyer_id=info.get("buyer_id"),
+                        zone=zone,
+                        seat={"row": row, "col": col},
+                        reservation_id=reservation_id,
+                        reason=reason,
+                    )
+
+            return released
+        finally:
+            for lock in reversed(lock_order):
+                lock.release()
+
+    def release_reservation(self, reservation_id, reason):
+        with self.meta_lock:
+            zone = self.reservation_to_zone.get(reservation_id)
+
+        if zone is None:
+            return False
+
+        zone_lock = self.zone_locks[zone]
+        if not zone_lock.acquire(timeout=0.05):
+            return False
+
+        try:
+            info = self.reservations_by_zone[zone].pop(reservation_id, None)
+            if info is None:
+                return False
+
+            row, col = info["seat"]
+            self.seat_status[row][col] = "FREE"
+            self.zone_free_seats[zone].add((row, col))
+
+            with self.meta_lock:
+                self.reservation_to_zone.pop(reservation_id, None)
+                self.metrics["expired_releases"] += 1
+
+            self._record_event(
+                "reservation_released",
+                buyer_id=info.get("buyer_id"),
+                zone=zone,
+                seat={"row": row, "col": col},
+                reservation_id=reservation_id,
+                reason=reason,
+            )
+            return True
+        finally:
+            zone_lock.release()
+
+    def can_buyer_type_keep_trying(self, buyer_type):
+        normalized = normalize_buyer_type(buyer_type)
+        zones = ALLOWED_ZONES_BY_TYPE.get(normalized, ALLOWED_ZONES_BY_TYPE[TIPO_NORMAL])
+        lock_order = [self.zone_locks[zone] for zone in zones]
+
+        for lock in lock_order:
+            lock.acquire()
+
+        try:
+            for zone in zones:
+                available_or_reserved = len(self.zone_free_seats[zone]) + len(self.reservations_by_zone[zone])
+                if available_or_reserved > 0:
+                    return True
+            return False
+        finally:
+            for lock in reversed(lock_order):
+                lock.release()
+
     def register_buyer(self, buyer_id):
         if not buyer_id:
             return
@@ -330,9 +420,15 @@ class TicketState:
 
     def _report_progress_milestones_locked(self):
         for porcentaje, umbral in (
-            (25, int(TOTAL_ASIENTOS * 0.25)),
+            (10, int(TOTAL_ASIENTOS * 0.10)),
+            (20, int(TOTAL_ASIENTOS * 0.20)),
+            (30, int(TOTAL_ASIENTOS * 0.30)),
+            (40, int(TOTAL_ASIENTOS * 0.40)),
             (50, int(TOTAL_ASIENTOS * 0.50)),
-            (75, int(TOTAL_ASIENTOS * 0.75)),
+            (60, int(TOTAL_ASIENTOS * 0.60)),
+            (70, int(TOTAL_ASIENTOS * 0.70)),
+            (80, int(TOTAL_ASIENTOS * 0.80)),
+            (90, int(TOTAL_ASIENTOS * 0.90)),
             (100, TOTAL_ASIENTOS),
         ):
             if self.sold_count >= umbral and porcentaje not in self.hitos_reportados:
@@ -587,16 +683,34 @@ class TicketState:
             seats_by_type = {}
             with self.events_lock:
                 recent_events = list(self.recent_events)
+            seat_counts_by_zone = {
+                ZONA_PLATINO: {"free": 0, "reserved": 0, "sold": 0},
+                ZONA_PREFERENTE: {"free": 0, "reserved": 0, "sold": 0},
+                ZONA_NORMAL: {"free": 0, "reserved": 0, "sold": 0},
+            }
+
+            for row_index, row in enumerate(seat_status_copy):
+                zone = self._zone_for_row(row_index)
+                zone_counts = seat_counts_by_zone[zone]
+                for state in row:
+                    if state == "SOLD":
+                        zone_counts["sold"] += 1
+                    elif state == "RESERVED":
+                        zone_counts["reserved"] += 1
+                    else:
+                        zone_counts["free"] += 1
+
+            for zone in ZONE_ORDER:
+                buyer_type = ZONE_TO_BUYER_TYPE[zone]
+                zone_counts = seat_counts_by_zone[zone]
+                seats_by_type[buyer_type] = {
+                    "free": zone_counts["free"],
+                    "sold": zone_counts["sold"],
+                    "reserved": zone_counts["reserved"],
+                    "total": zone_counts["free"] + zone_counts["sold"] + zone_counts["reserved"],
+                }
+
             with self.meta_lock:
-                for zone in ZONE_ORDER:
-                    buyer_type = ZONE_TO_BUYER_TYPE[zone]
-                    total_seats = len(self.zone_free_seats[zone]) + len(self.reservations_by_zone[zone]) + self.purchased_by_type[buyer_type]
-                    seats_by_type[buyer_type] = {
-                        "free": len(self.zone_free_seats[zone]),
-                        "sold": self.purchased_by_type[buyer_type],
-                        "reserved": len(self.reservations_by_zone[zone]),
-                        "total": total_seats,
-                    }
                 return {
                     "sold_count": self.sold_count,
                     "reserved_count": reserved_count,
@@ -614,6 +728,14 @@ class TicketState:
         finally:
             for lock in reversed(lock_order):
                 lock.release()
+
+    @staticmethod
+    def _zone_for_row(row_index):
+        if row_index <= 2:
+            return ZONA_PLATINO
+        if row_index <= 6:
+            return ZONA_PREFERENTE
+        return ZONA_NORMAL
 
     def print_summary_once(self):
         with self.meta_lock:
@@ -696,6 +818,9 @@ def run_internal_load(ticket_state, buyers=50, client_type=TIPO_NORMAL, worker_d
         while not ticket_state.sales_closed() and not ticket_state.sold_out_event.is_set():
             time.sleep(random.uniform(*worker_delay))
 
+            if not ticket_state.can_buyer_type_keep_trying(client_type):
+                break
+
             reserve_response = ticket_state.request_ticket(buyer_id, client_type, str(uuid.uuid4()))
             reserve_status = reserve_response.get("status")
 
@@ -703,32 +828,35 @@ def run_internal_load(ticket_state, buyers=50, client_type=TIPO_NORMAL, worker_d
                 reservation_id = reserve_response.get("reservation_id")
                 if not reservation_id:
                     continue
-            elif reserve_status in {"closed", "sold_out"}:
-                break
-            elif reserve_status == "not_started":
-                time.sleep(0.05)
-                continue
-            else:
-                time.sleep(0.03)
-                continue
 
-            purchase_response = ticket_state.purchase(buyer_id, reservation_id, str(uuid.uuid4()))
-            purchase_status = purchase_response.get("status")
+                purchase_response = ticket_state.purchase(buyer_id, reservation_id, str(uuid.uuid4()))
+                purchase_status = purchase_response.get("status")
 
-            if purchase_status == "ok":
-                purchased = True
-                if int(purchase_response.get("remaining") or 1) <= 0:
-                    ticket_state.sold_out_event.set()
-                break
+                if purchase_status == "ok":
+                    purchased = True
+                    if int(purchase_response.get("remaining") or 1) <= 0:
+                        ticket_state.sold_out_event.set()
+                    break
 
-            if purchase_status in {"closed", "sold_out"}:
-                break
+                if purchase_status in {"closed", "sold_out"}:
+                    ticket_state.release_reservation(reservation_id, f"purchase_{purchase_status}")
+                    break
 
-            if purchase_status == "not_started":
-                time.sleep(0.05)
+                ticket_state.release_reservation(reservation_id, f"purchase_{purchase_status or 'failed'}")
                 continue
 
-            time.sleep(0.03)
+            if reserve_status in {"closed", "sold_out"}:
+                break
+
+            if reserve_status == "not_started":
+                continue
+
+            if reserve_status == "no_zone_available":
+                if not ticket_state.can_buyer_type_keep_trying(client_type):
+                    break
+                continue
+
+            continue
 
         with stats_lock:
             if purchased:
@@ -749,6 +877,15 @@ def run_internal_load(ticket_state, buyers=50, client_type=TIPO_NORMAL, worker_d
 
     stats["finished_at"] = time.perf_counter()
     stats["elapsed"] = stats["finished_at"] - stats["started_at"]
+
+    released = ticket_state.release_reservations_for_buyer_prefix(client_id, "load_finished_cleanup")
+    if released:
+        ticket_state._record_event(
+            "load_reservations_released",
+            client_id=client_id,
+            buyers=buyers,
+            released=released,
+        )
 
     ticket_state._record_event(
         "load_finished",
@@ -1491,7 +1628,7 @@ def cleanup_expired_reservations(ticket_state):
                         ticket_state._cleanup_expired_zone_locked(zone)
                     finally:
                         zone_lock.release()
-        time.sleep(0.25)
+        time.sleep(0.05)
 
 
 def monitor_sold_out(ticket_state):
