@@ -17,6 +17,7 @@ Mostrar en tiempo real el estado de la venta: asientos libres, reservados y vend
 ## Componentes
 
 - `webapp/`: dashboard visual de monitoreo.
+- `PWA/`: la aplicación que funge como cliente.
 - `servidor.py`: API principal de la venta.
 - `ticketing_service.py`: servicio externo que persiste tickets.
 
@@ -40,7 +41,17 @@ python ticketing_service.py --host 127.0.0.1 --port 7000 --store-file tickets/ti
 python servidor.py --host 127.0.0.1 --port 8080 --ticket-service-host 127.0.0.1 --ticket-service-port 7000
 ```
 
-3. Sirve la carpeta `webapp/` con cualquier servidor estático y proxy a `/api`, o usa Docker Compose.
+3. Iniciar la ejecución de la PWA:
+
+```bash
+python -m http.server 8000 --directory webapp  
+```
+
+4. Acceder al http del dashboard y pwa para comprobar el funcionamiento del proyecto:
+
+http://127.0.0.1:5001/dashboard
+http://127.0.0.1:8000/index.html
+
 
 ## Docker
 
